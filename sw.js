@@ -13,9 +13,9 @@ const CACHE_NAME = 'cl2'; // MUST match CACHE_NAME used by loader.html when cach
 const SCOPE_PREFIX = self.registration.scope;
 
 const EXACT_PATHS = new Set([
-  'assets/assets/hl2.png',
+  'assets/hl2.png',
   'assets/icon-192.png',
-  'chunks/chunks/background01.data',
+  'chunks/background01.data',
   'chunks/background02.data',
   'chunks/background03.data',
   'chunks/background04.data',
