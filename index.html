@@ -119,17 +119,29 @@
         }
 
         // Tracks aggregate progress across all parts and drives the UI.
+        // Total size is estimated on the fly from Content-Length headers on the
+        // real GET requests (no separate HEAD pre-flight — some CDNs, Netlify
+        // included, don't reliably serve HEAD for large static assets even
+        // though GET works fine).
         const progress = {
-            totalBytes: 0,        // sum of Content-Length across parts (0 if unknown)
             loadedBytes: 0,
             partsDone: 0,
+            knownSizeSum: 0,   // sum of Content-Length for parts where it was known
+            knownSizeCount: 0, // how many parts contributed to knownSizeSum
             startTime: 0,
         };
 
+        function estimatedTotalBytes() {
+            if (progress.knownSizeCount === 0) return 0;
+            const avgPartSize = progress.knownSizeSum / progress.knownSizeCount;
+            return avgPartSize * CONFIG.totalParts;
+        }
+
         function renderProgress() {
-            const byBytes = progress.totalBytes > 0;
+            const totalBytes = estimatedTotalBytes();
+            const byBytes = totalBytes > 0;
             const fraction = byBytes
-                ? progress.loadedBytes / progress.totalBytes
+                ? progress.loadedBytes / totalBytes
                 : progress.partsDone / CONFIG.totalParts;
             const pct = Math.min(100, Math.max(0, fraction * 100));
 
@@ -137,7 +149,7 @@
             els.pct.textContent = Math.round(pct) + "%";
             els.parts.textContent = `${progress.partsDone} / ${CONFIG.totalParts} parts`;
             els.bytes.textContent = byBytes
-                ? `${fmtMB(progress.loadedBytes)} / ${fmtMB(progress.totalBytes)}`
+                ? `${fmtMB(progress.loadedBytes)} / ~${fmtMB(totalBytes)}`
                 : fmtMB(progress.loadedBytes);
 
             const elapsed = (performance.now() - progress.startTime) / 1000;
@@ -146,24 +158,6 @@
                 const remaining = (1 - fraction) / rate;
                 els.eta.textContent = fmtETA(remaining);
             }
-        }
-
-        async function getTotalBytes() {
-            // Sum Content-Length across all parts via HEAD so we can show byte-accurate
-            // progress + ETA. If any HEAD fails or omits Content-Length, fall back to
-            // parts-based progress instead (handled in renderProgress).
-            let total = 0;
-            for (let i = 1; i <= CONFIG.totalParts; i++) {
-                try {
-                    const res = await fetch(CONFIG.partPath(i), { method: "HEAD" });
-                    const len = res.headers.get("content-length");
-                    if (!len) return 0;
-                    total += parseInt(len, 10);
-                } catch {
-                    return 0;
-                }
-            }
-            return total;
         }
 
         async function main() {
@@ -199,9 +193,6 @@
                 file.start();
             };
 
-            // --- Get total size up front so progress/ETA are accurate ---
-            els.status.textContent = "Checking download size\u2026";
-            progress.totalBytes = await getTotalBytes();
             progress.startTime = performance.now();
             els.status.textContent = "Downloading\u2026";
 
@@ -211,6 +202,13 @@
                 if (!res.ok) {
                     throw new Error(`Failed to fetch ${CONFIG.partPath(i)}: ${res.status}`);
                 }
+
+                const len = res.headers.get("content-length");
+                if (len) {
+                    progress.knownSizeSum += parseInt(len, 10);
+                    progress.knownSizeCount += 1;
+                }
+
                 const reader = res.body.getReader();
 
                 while (true) {
