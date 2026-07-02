@@ -91,8 +91,12 @@
         const CONFIG = {
             totalParts: 75,
             partPath: (i) => `HL2_Web.zip.part${String(i).padStart(2, '0')}`,
-            cacheName: "app-assets-v1",
-            appDir: "app/"
+            // MUST match CACHE_NAME in sw.js
+            cacheName: "cl2",
+            // Files are cached at paths relative to the SW scope root — no
+            // prefix — because sw.js matches requests against the scope root
+            // directly (e.g. 'chunks/d1_canals_01.data', not 'app/chunks/...').
+            appDir: ""
         };
 
         const els = {
@@ -161,6 +165,18 @@
         }
 
         async function main() {
+            if (!('serviceWorker' in navigator)) {
+                throw new Error("Service workers aren't supported in this browser.");
+            }
+
+            // Register the SW up front. It doesn't need the cache populated to
+            // install/activate — it only reads the cache lazily per-request —
+            // but the page it's asked to control (the iframe below) won't be
+            // intercepted until it's active, so we wait for that here.
+            els.status.textContent = "Registering service worker\u2026";
+            await navigator.serviceWorker.register("sw.js");
+            await navigator.serviceWorker.ready;
+
             const cache = await caches.open(CONFIG.cacheName);
 
             // --- Set up the streaming unzipper (correct fflate streaming API) ---
