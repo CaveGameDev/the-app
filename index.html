@@ -63,10 +63,6 @@
         #meta-row b { color: var(--text); font-weight: 600; }
         #meta-row .warn { color: var(--warn); }
         #meta-row .err { color: var(--error); }
-        #stage {
-            position: fixed; inset: 0; border: 0; width: 100%; height: 100%;
-            display: none; z-index: 10; background: #000;
-        }
     </style>
 </head>
 <body>
@@ -84,8 +80,6 @@
         </div>
     </div>
 
-    <iframe id="stage"></iframe>
-
     <script src="https://unpkg.com/fflate@0.8.2/umd/index.js"></script>
     <script>
         const CONFIG = {
@@ -96,8 +90,15 @@
             // Files are cached at paths relative to the SW scope root — no
             // prefix — because sw.js matches requests against the scope root
             // directly (e.g. 'chunks/d1_canals_01.data', not 'app/chunks/...').
-            appDir: ""
+            appDir: "",
+            // Bump this whenever the zip contents change to invalidate old caches.
+            zipVersion: "v1"
         };
+
+        // Written into the cache once extraction fully succeeds; checked on
+        // every load so we skip the 1.6GB download+extract entirely when the
+        // cache is already populated and current.
+        const MANIFEST_URL = new URL("__hl2_cache_manifest__", location.href).href;
 
         const els = {
             shell: document.getElementById("shell"),
@@ -107,7 +108,6 @@
             parts: document.getElementById("stat-parts"),
             bytes: document.getElementById("stat-bytes"),
             eta: document.getElementById("stat-eta"),
-            stage: document.getElementById("stage"),
         };
 
         function fmtMB(bytes) {
@@ -120,6 +120,33 @@
             const m = Math.floor(seconds / 60);
             const s = Math.round(seconds % 60);
             return m > 0 ? `~${m}m ${s}s remaining` : `~${s}s remaining`;
+        }
+
+        async function readManifest(cache) {
+            const resp = await cache.match(MANIFEST_URL);
+            if (!resp) return null;
+            try {
+                return await resp.json();
+            } catch {
+                return null;
+            }
+        }
+
+        async function writeManifest(cache) {
+            const manifest = {
+                zipVersion: CONFIG.zipVersion,
+                totalParts: CONFIG.totalParts,
+                completedAt: new Date().toISOString(),
+            };
+            await cache.put(MANIFEST_URL, new Response(JSON.stringify(manifest), {
+                headers: { "Content-Type": "application/json" }
+            }));
+        }
+
+        function manifestIsCurrent(manifest) {
+            return !!manifest
+                && manifest.zipVersion === CONFIG.zipVersion
+                && manifest.totalParts === CONFIG.totalParts;
         }
 
         // Tracks aggregate progress across all parts and drives the UI.
@@ -177,7 +204,38 @@
             await navigator.serviceWorker.register("sw.js");
             await navigator.serviceWorker.ready;
 
+            // Ask the browser not to silently evict this ~1.6GB cache under
+            // storage pressure. Not guaranteed (esp. Safari), but it helps.
+            if (navigator.storage && navigator.storage.persist) {
+                try { await navigator.storage.persist(); } catch { /* best effort */ }
+            }
+
+            const forceReset = new URLSearchParams(location.search).has("reset");
+            if (forceReset) {
+                els.status.textContent = "Clearing cache\u2026";
+                await caches.delete(CONFIG.cacheName);
+            }
             const cache = await caches.open(CONFIG.cacheName);
+
+            // --- Skip the whole download+extract if we already have a current,
+            // fully-extracted cache from a previous run ---
+            if (!forceReset) {
+                const manifest = await readManifest(cache);
+                if (manifestIsCurrent(manifest)) {
+                    els.status.textContent = "Loaded from cache";
+                    els.fill.style.width = "100%";
+                    els.pct.textContent = "100%";
+                    els.parts.textContent = `${CONFIG.totalParts} / ${CONFIG.totalParts} parts`;
+                    els.bytes.textContent = "cached";
+                    els.eta.textContent = "done";
+
+                    // Top-level navigation (not an iframe) — SharedArrayBuffer
+                    // requires the document itself to be crossOriginIsolated,
+                    // which needs COOP/COEP on the actual top-level response.
+                    location.href = CONFIG.appDir + "index.html";
+                    return;
+                }
+            }
 
             // --- Set up the streaming unzipper (correct fflate streaming API) ---
             const unzipper = new fflate.Unzip();
@@ -244,6 +302,7 @@
 
             els.status.textContent = "Finishing up\u2026";
             await Promise.all(pendingWrites);
+            await writeManifest(cache);
 
             // --- Launch ---
             els.status.textContent = "Launching\u2026";
@@ -251,9 +310,8 @@
             els.pct.textContent = "100%";
             els.eta.textContent = "done";
 
-            els.stage.src = CONFIG.appDir + "index.html";
-            els.stage.style.display = "block";
-            els.shell.classList.add("hidden");
+            // Top-level navigation (not an iframe) — see note above.
+            location.href = CONFIG.appDir + "index.html";
         }
 
         main().catch((err) => {
