@@ -1,8 +1,16 @@
-importScripts('fflate.js');
+// This service worker no longer unzips anything itself. The loader page
+// (loader.html) streams the zip parts, extracts each file with fflate as it
+// downloads, and writes every extracted file straight into Cache Storage
+// under CACHE_NAME, keyed by its path relative to this SW's scope (i.e. no
+// extra prefix — 'chunks/d1_canals_01.data', not 'app/chunks/...').
+//
+// This SW's only job is to intercept requests for known game asset paths and
+// serve them out of that cache with the correct Content-Type. It does NOT
+// import fflate and does NOT decompress anything — that already happened in
+// the loader before the page ever navigated here.
 
-const CACHE_NAME = 'cl2';
+const CACHE_NAME = 'cl2'; // MUST match CACHE_NAME used by loader.html when caching files
 const SCOPE_PREFIX = self.registration.scope;
-let decompressedData = null;
 
 const EXACT_PATHS = new Set([
   'assets/assets/hl2.png',
@@ -126,9 +134,7 @@ self.addEventListener('activate', (event) => {
     (async () => {
       const keys = await caches.keys();
       await Promise.all(
-        keys
-          .filter((k) => k.startsWith('app-assets-') && k !== CACHE_NAME)
-          .map((k) => caches.delete(k))
+        keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))
       );
       await self.clients.claim();
     })()
@@ -167,27 +173,6 @@ function mimeFor(path) {
   return map[ext] || 'application/octet-stream';
 }
 
-async function loadArchive() {
-  if (decompressedData) return decompressedData;
-  try {
-    const cache = await caches.open(CACHE_NAME);
-    const response = await cache.match(SCOPE_PREFIX + 'HL2_Web.zip');
-    if (!response) return null;
-    const buffer = await response.arrayBuffer();
-    return new Promise((resolve) => {
-      fflate.unzip(new Uint8Array(buffer), (err, data) => {
-        if (err) resolve(null);
-        else {
-          decompressedData = data;
-          resolve(data);
-        }
-      });
-    });
-  } catch (e) {
-    return null;
-  }
-}
-
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (!url.href.startsWith(SCOPE_PREFIX)) {
@@ -201,24 +186,26 @@ self.addEventListener('fetch', (event) => {
 
   event.respondWith(
     (async () => {
-      const data = await loadArchive();
-      if (!data) {
-        try {
-          return await fetch(event.request);
-        } catch (err) {
-          return new Response('Resource unavailable', { status: 404 });
-        }
+      const cache = await caches.open(CACHE_NAME);
+      const cached = await cache.match(SCOPE_PREFIX + relativePath);
+
+      if (!cached) {
+        // Nothing in cache yet for this path — the loader hasn't finished
+        // extracting it (or extraction failed for this file). Don't fall
+        // through to the network: these paths don't exist as real server
+        // routes, so a network fetch would just 404 and mask the real
+        // problem. Surface it clearly instead.
+        return new Response(
+          `Asset not yet cached: ${relativePath}`,
+          { status: 404 }
+        );
       }
 
-      const fileBytes = data[relativePath];
-      if (!fileBytes) {
-        return new Response('Not Found', { status: 404 });
-      }
-
-      return new Response(fileBytes, {
-        headers: { 
+      const buf = await cached.arrayBuffer();
+      return new Response(buf, {
+        headers: {
           'Content-Type': mimeFor(relativePath),
-          'Content-Length': String(fileBytes.byteLength)
+          'Content-Length': String(buf.byteLength),
         },
       });
     })()
